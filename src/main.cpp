@@ -1,15 +1,18 @@
 /**
  * @file main.cpp
  * @author Your Name
- * @brief Aegis-Quad Flight Control System - Main Executive Loop
- * @version 0.1
- * @date 2024-05-01
+ * @brief Aegis-Quad Flight Control System - Unified Phase 1 Core Execution
+ * @version 1.0
+ * @date 2024-05-12
  */
 
 #include <Arduino.h>
+#include "IMU.h"
+#include "Radio.h"
 
 // --- System States ---
-enum FlightState {
+enum FlightState
+{
     BOOT,
     DISARMED,
     CALIBRATING,
@@ -19,50 +22,95 @@ enum FlightState {
 
 FlightState currentState = BOOT;
 
-// --- Timing Variables ---
+// --- Hardware Instantiations ---
+IMU imu;
+Radio radio(Serial2); // Se asume Serial2 para la Radio (IBUS)
+
+// --- Timing Control (Hard Real-Time Architecture) ---
 unsigned long previousMicros = 0;
-const unsigned long targetCycleTime = 4000; // 250Hz = 4000us
+const unsigned long targetCycleTime = 4000; // 250Hz Main Loop (4000us)
 
-void setup() {
-    Serial.begin(115200);
-    
-    // Initialize Hardware Abstraction Layers here
-    // IMU_Init();
-    // Radio_Init();
-    // Motor_Init();
+unsigned long previousTelemetryMillis = 0;
+const unsigned long telemetryInterval = 20; // Telemetría a 50Hz (cada 20ms) para no saturar el bus
 
-    currentState = DISARMED;
-    Serial.println("AEGIS-QUAD: System Disarmed. Ready to Calibrate.");
+// --- Optimized Telemetry Function ---
+void sendTelemetry()
+{
+    if (millis() - previousTelemetryMillis >= telemetryInterval)
+    {
+        previousTelemetryMillis = millis();
+
+        // Formato CSV ligero optimizado para Serial Plotter
+        Serial.print(imu.getPitch(), 2);
+        Serial.print(",");
+        Serial.print(imu.getRoll(), 2);
+        Serial.print(",");
+        Serial.print(radio.getThrottle());
+        Serial.print(",");
+        Serial.println(radio.getYaw());
+    }
 }
 
-void loop() {
-    // Enforcement of the 250Hz Loop
-    while (micros() - previousMicros < targetCycleTime);
+void setup()
+{
+    Serial.begin(115200); // Telemetría principal por el puerto UART0 (USB)
+
+    // HAL Initializations
+    imu.init();
+    radio.init();
+
+    // Calibración inicial estática del giroscopio
+    currentState = CALIBRATING;
+    Serial.println("AEGIS-QUAD: Calibrating sensors... Keep flat.");
+    imu.calibrateGyro();
+
+    currentState = DISARMED;
+    Serial.println("AEGIS-QUAD: System Ready.");
+}
+
+void loop()
+{
+    // 1. Enforce strict 250Hz frequency loop
+    while (micros() - previousMicros < targetCycleTime)
+        ;
     previousMicros = micros();
 
-    // Finite State Machine
-    switch (currentState) {
-        case DISARMED:
-            // Check for Arming sequence from Radio
-            break;
+    // 2. Read Background Radio stream (Non-blocking UART buffer check)
+    radio.readReceiver();
 
-        case CALIBRATING:
-            // Sensor fusion bias calculation
-            break;
+    // 3. Finite State Machine Executive Core
+    switch (currentState)
+    {
+    case DISARMED:
+        imu.updateAttitude(); // Seguir calculando ángulos en reposo
 
-        case ARMED:
-            // 1. Read Sensors
-            // 2. PID Computation
-            // 3. Motor Mixing
-            // 4. Output to ESCs
-            break;
+        // Lógica de transición temporal (Si el switch auxiliar está activo -> ARM)
+        if (radio.getSwitchA() > 1500 && radio.getThrottle() < 1050)
+        {
+            currentState = ARMED;
+        }
+        break;
 
-        case FAILSAFE:
-            // Emergency motor shutdown
-            break;
+    case ARMED:
+        imu.updateAttitude(); // Fusión de sensores en tiempo real
 
-        default:
-            currentState = FAILSAFE;
-            break;
+        // Aquí irá el cómputo de la clase PID en la Fase 3
+
+        if (radio.getSwitchA() < 1500)
+        { // Desarmado de emergencia instantáneo
+            currentState = DISARMED;
+        }
+        break;
+
+    case FAILSAFE:
+        // Apagar comandos de salida (Fase 4)
+        break;
+
+    default:
+        currentState = FAILSAFE;
+        break;
     }
+
+    // 4. Stream non-blocking telemetry data
+    sendTelemetry();
 }
