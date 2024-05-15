@@ -1,16 +1,17 @@
 /**
  * @file main.cpp
- * @author Your Name
- * @brief Aegis-Quad Flight Control System - Unified Phase 1 Core Execution
- * @version 1.0
- * @date 2024-05-12
+ * @author javtl
+ * @brief Aegis-Quad Flight Control System - Integrated Executive FSM Core
+ * @version 1.1
+ * @date 2024-05-15
  */
 
 #include <Arduino.h>
 #include "IMU.h"
 #include "Radio.h"
+#include "Motors.h"
 
-// --- System States ---
+// --- Robust Operational States (FSM) ---
 enum FlightState
 {
     BOOT,
@@ -24,86 +25,99 @@ FlightState currentState = BOOT;
 
 // --- Hardware Instantiations ---
 IMU imu;
-Radio radio(Serial2); // Se asume Serial2 para la Radio (IBUS)
+Radio radio(Serial2); // Explicit UART routing for digital RC receiver
+Motors motors;
 
-// --- Timing Control (Hard Real-Time Architecture) ---
+// --- High-Resolution Timing Constraints ---
 unsigned long previousMicros = 0;
-const unsigned long targetCycleTime = 4000; // 250Hz Main Loop (4000us)
+const unsigned long targetCycleTime = 4000; // Hard real-time 250Hz Main Loop (4ms)
 
 unsigned long previousTelemetryMillis = 0;
-const unsigned long telemetryInterval = 20; // Telemetría a 50Hz (cada 20ms) para no saturar el bus
+const unsigned long telemetryInterval = 20; // Bound telemetry serialization to 50Hz (20ms)
 
-// --- Optimized Telemetry Function ---
+/**
+ * @brief High-speed non-blocking telemetry payload deployment
+ */
 void sendTelemetry()
 {
     if (millis() - previousTelemetryMillis >= telemetryInterval)
     {
         previousTelemetryMillis = millis();
 
-        // Formato CSV ligero optimizado para Serial Plotter
+        // Compact CSV protocol format for real-time serial plotting
         Serial.print(imu.getPitch(), 2);
         Serial.print(",");
         Serial.print(imu.getRoll(), 2);
         Serial.print(",");
         Serial.print(radio.getThrottle());
         Serial.print(",");
-        Serial.println(radio.getYaw());
+        Serial.print(radio.getYaw());
+        Serial.print(",");
+        Serial.println(currentState); // Track numerical state value
     }
 }
 
 void setup()
 {
-    Serial.begin(115200); // Telemetría principal por el puerto UART0 (USB)
+    Serial.begin(115200); // Primary debug and data-logging pipeline
 
-    // HAL Initializations
+    // Low-level HAL Scaffolding setup
     imu.init();
     radio.init();
-
-    // Calibración inicial estática del giroscopio
-    currentState = CALIBRATING;
-    Serial.println("AEGIS-QUAD: Calibrating sensors... Keep flat.");
-    imu.calibrateGyro();
+    motors.init();
 
     currentState = DISARMED;
-    Serial.println("AEGIS-QUAD: System Ready.");
+    Serial.println("AEGIS-QUAD: Core Scaffolding Operational. System Disarmed.");
 }
 
 void loop()
 {
-    // 1. Enforce strict 250Hz frequency loop
+    // 1. Enforce deterministic hard real-time execution constraint
     while (micros() - previousMicros < targetCycleTime)
         ;
     previousMicros = micros();
 
-    // 2. Read Background Radio stream (Non-blocking UART buffer check)
+    // 2. Fetch network background data stream (non-blocking rx UART parsing)
     radio.readReceiver();
 
-    // 3. Finite State Machine Executive Core
+    // 3. Finite State Machine Executive Core Loop
     switch (currentState)
     {
     case DISARMED:
-        imu.updateAttitude(); // Seguir calculando ángulos en reposo
+        imu.updateAttitude();   // Track current orientation in standby
+        motors.commandAllMin(); // Enforce hardware cutoff safety signal
 
-        // Lógica de transición temporal (Si el switch auxiliar está activo -> ARM)
-        if (radio.getSwitchA() > 1500 && radio.getThrottle() < 1050)
+        // Verify if the safety sustained stick combination is fulfilled
+        if (radio.checkArmingSequence())
         {
-            currentState = ARMED;
+            currentState = CALIBRATING;
         }
         break;
 
+    case CALIBRATING:
+        motors.commandAllMin(); // Keep safe boundaries while configuring
+        Serial.println("AEGIS-QUAD: Sensor Bias Recalibration in Progress...");
+        imu.calibrateGyro(); // Wipe out drift offsets right before throttle window opens
+
+        currentState = ARMED;
+        Serial.println("AEGIS-QUAD: Safety Overridden. MOTORS LIVE.");
+        break;
+
     case ARMED:
-        imu.updateAttitude(); // Fusión de sensores en tiempo real
+        imu.updateAttitude(); // Active Sensor Fusion engine runtime
 
-        // Aquí irá el cómputo de la clase PID en la Fase 3
+        // [Fase 3: PID Computation, Motor Mixer Integration and writeMotors execution will be placed here]
 
-        if (radio.getSwitchA() < 1500)
-        { // Desarmado de emergencia instantáneo
+        // Check for immediate emergency manual disarm sequence
+        if (radio.checkDisarmingSequence())
+        {
             currentState = DISARMED;
+            Serial.println("AEGIS-QUAD: System Disarmed Safely.");
         }
         break;
 
     case FAILSAFE:
-        // Apagar comandos de salida (Fase 4)
+        motors.commandAllMin(); // Force motor safe shutdown threshold
         break;
 
     default:
@@ -111,6 +125,6 @@ void loop()
         break;
     }
 
-    // 4. Stream non-blocking telemetry data
+    // 4. Stream isolated metrics without loop degradation
     sendTelemetry();
 }
