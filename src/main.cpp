@@ -1,9 +1,9 @@
 /**
  * @file main.cpp
  * @author javtl
- * @brief Aegis-Quad Flight Control System - Triple Axis PID Integration
- * @version 1.2
- * @date 2024-05-26
+ * @brief Aegis-Quad Flight Control System - Integrated Executive FSM Core
+ * @version 1.3
+ * @date 2024-05-28
  */
 
 #include <Arduino.h>
@@ -131,6 +131,9 @@ void loop()
         // Yaw stick maps directly to angular velocity setpoint (-100 deg/s to +100 deg/s)
         float yawSetpoint = ((float)radio.getYaw() - 1500.0f) * 0.2f;
 
+        // Extract raw baseline throttle from pilot stick
+        uint16_t throttleBaseline = radio.getThrottle();
+
         // --- Compute PID Corrective Actuation Outputs ---
         float rollOutput = rollPID.compute(rollSetpoint, imu.getRoll());
         float pitchOutput = pitchPID.compute(pitchSetpoint, imu.getPitch());
@@ -138,7 +141,23 @@ void loop()
         // For Yaw stabilization we feed raw gyroscope Z-axis angular velocity
         float yawOutput = yawPID.compute(yawSetpoint, imu.getGyroZ());
 
-        // [Fase 3: Ticket #14 - Motor Mixer Integration will inject these outputs into writeMotors]
+        // --- Motor Mixer Matrix Logic (Quad-X Configuration) ---
+        // Only mix active PID stabilization if throttle is above safe idle threshold
+        if (throttleBaseline > 1060)
+        {
+            uint16_t m1_speed = throttleBaseline - rollOutput + pitchOutput - yawOutput; // Front-Right
+            uint16_t m2_speed = throttleBaseline - rollOutput - pitchOutput + yawOutput; // Rear-Right
+            uint16_t m3_speed = throttleBaseline + rollOutput - pitchOutput - yawOutput; // Rear-Left
+            uint16_t m4_speed = throttleBaseline + rollOutput + pitchOutput + yawOutput; // Front-Left
+
+            // Write unified blended vector directly to the low-level ESC driver
+            motors.writeMotors(m1_speed, m2_speed, m3_speed, m4_speed);
+        }
+        else
+        {
+            // Idle Spin / Min Throttle Guardrail when stick is down to prevent ground spin
+            motors.writeMotors(1040, 1040, 1040, 1040);
+        }
 
         // Check for immediate emergency manual disarm sequence
         if (radio.checkDisarmingSequence())
