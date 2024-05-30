@@ -2,8 +2,8 @@
  * @file main.cpp
  * @author javtl
  * @brief Aegis-Quad Flight Control System - Integrated Executive FSM Core
- * @version 1.3
- * @date 2024-05-28
+ * @version 1.4
+ * @date 2024-05-30
  */
 
 #include <Arduino.h>
@@ -44,22 +44,31 @@ const unsigned long targetCycleTime = 4000; // Hard real-time 250Hz Main Loop (4
 unsigned long previousTelemetryMillis = 0;
 const unsigned long telemetryInterval = 20; // Bound telemetry serialization to 50Hz (20ms)
 
+// Phase 4: Static Telemetry Buffer Allocation to eliminate dynamic overhead
+char telemetryBuffer[96];
+
 void sendTelemetry()
 {
     if (millis() - previousTelemetryMillis >= telemetryInterval)
     {
         previousTelemetryMillis = millis();
 
-        // Extended CSV protocol for PID tracking and battery monitor
-        Serial.print(imu.getPitch(), 2);
-        Serial.print(",");
-        Serial.print(imu.getRoll(), 2);
-        Serial.print(",");
-        Serial.print(radio.getThrottle());
-        Serial.print(",");
-        Serial.print(battery.getVoltage(), 2);
-        Serial.print(",");
-        Serial.println(currentState);
+        // High-speed single-pass formatting directly into memory block
+        // Compact Format: Time,Pitch,Roll,Throttle,Voltage,State
+        int written = snprintf(telemetryBuffer, sizeof(telemetryBuffer),
+                               "%lu,%.2f,%.2f,%u,%.2f,%d",
+                               previousTelemetryMillis,
+                               imu.getPitch(),
+                               imu.getRoll(),
+                               radio.getThrottle(),
+                               battery.getVoltage(),
+                               (int)currentState);
+
+        // Single atomic hardware UART write operation
+        if (written > 0 && written < (int)sizeof(telemetryBuffer))
+        {
+            Serial.println(telemetryBuffer);
+        }
     }
 }
 
