@@ -2,8 +2,8 @@
  * @file main.cpp
  * @author javtl
  * @brief Aegis-Quad Flight Control System - Integrated Executive FSM Core
- * @version 1.4
- * @date 2024-05-30
+ * @version 1.5
+ * @date 2024-06-03
  */
 
 #include <Arduino.h>
@@ -12,6 +12,7 @@
 #include "Motors.h"
 #include "Battery.h"
 #include "PID.h"
+#include "Blackbox.h"
 
 // --- Robust Operational States (FSM) ---
 enum FlightState
@@ -30,12 +31,12 @@ IMU imu;
 Radio radio(Serial2);
 Motors motors;
 Battery battery;
+Blackbox blackbox(10); // Instancia de la Blackbox usando el Pin 10 como Chip Select (CS)
 
 // --- Phase 3: Triple-Axis PID Control Loop Instantiation ---
-// Parameters tuned empirically: PID(Kp, Ki, Kd)
-PID rollPID(1.20f, 0.05f, 0.035f);  // Final coefficients from Ticket #12
-PID pitchPID(1.20f, 0.05f, 0.035f); // Symmetrical frame layout baseline
-PID yawPID(2.00f, 0.02f, 0.00f);    // Yaw typically uses zero derivative to avoid gear noise
+PID rollPID(1.20f, 0.05f, 0.035f);
+PID pitchPID(1.20f, 0.05f, 0.035f);
+PID yawPID(2.00f, 0.02f, 0.00f);
 
 // --- High-Resolution Timing Constraints ---
 unsigned long previousMicros = 0;
@@ -43,6 +44,10 @@ const unsigned long targetCycleTime = 4000; // Hard real-time 250Hz Main Loop (4
 
 unsigned long previousTelemetryMillis = 0;
 const unsigned long telemetryInterval = 20; // Bound telemetry serialization to 50Hz (20ms)
+
+// Phase 4: Multi-Rate Blackbox Constraints
+unsigned long previousBlackboxMillis = 0;
+const unsigned long blackboxInterval = 50; // Bound local SD logging to 20Hz (50ms) to prevent write stalls
 
 // Phase 4: Static Telemetry Buffer Allocation to eliminate dynamic overhead
 char telemetryBuffer[96];
@@ -54,7 +59,6 @@ void sendTelemetry()
         previousTelemetryMillis = millis();
 
         // High-speed single-pass formatting directly into memory block
-        // Compact Format: Time,Pitch,Roll,Throttle,Voltage,State
         int written = snprintf(telemetryBuffer, sizeof(telemetryBuffer),
                                "%lu,%.2f,%.2f,%u,%.2f,%d",
                                previousTelemetryMillis,
@@ -72,6 +76,18 @@ void sendTelemetry()
     }
 }
 
+void writeBlackbox()
+{
+    // Solo escribimos localmente en la SD si ha pasado el intervalo de 50ms y el dron está armado
+    if (currentState == ARMED && (millis() - previousBlackboxMillis >= blackboxInterval))
+    {
+        previousBlackboxMillis = millis();
+
+        // Ingestión atómica directa utilizando el buffer estático pre-formateado
+        blackbox.writeRow(telemetryBuffer);
+    }
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -81,6 +97,9 @@ void setup()
     radio.init();
     motors.init();
     battery.init();
+
+    // Inicialización del sistema de almacenamiento Blackbox
+    blackbox.init();
 
     currentState = DISARMED;
     Serial.println("AEGIS-QUAD: Core Scaffolding Operational. System Disarmed.");
@@ -133,11 +152,8 @@ void loop()
         imu.updateAttitude(); // Active Sensor Fusion engine runtime
 
         // --- PID Input Target Generation (Mapping Radio to Angles) ---
-        // Mapping pulse widths (1000-2000us) to target stabilization angles (-30 deg to +30 deg)
         float rollSetpoint = ((float)radio.getRoll() - 1500.0f) * 0.06f;
         float pitchSetpoint = ((float)radio.getPitch() - 1500.0f) * 0.06f;
-
-        // Yaw stick maps directly to angular velocity setpoint (-100 deg/s to +100 deg/s)
         float yawSetpoint = ((float)radio.getYaw() - 1500.0f) * 0.2f;
 
         // Extract raw baseline throttle from pilot stick
@@ -146,12 +162,9 @@ void loop()
         // --- Compute PID Corrective Actuation Outputs ---
         float rollOutput = rollPID.compute(rollSetpoint, imu.getRoll());
         float pitchOutput = pitchPID.compute(pitchSetpoint, imu.getPitch());
-
-        // For Yaw stabilization we feed raw gyroscope Z-axis angular velocity
         float yawOutput = yawPID.compute(yawSetpoint, imu.getGyroZ());
 
         // --- Motor Mixer Matrix Logic (Quad-X Configuration) ---
-        // Only mix active PID stabilization if throttle is above safe idle threshold
         if (throttleBaseline > 1060)
         {
             uint16_t m1_speed = throttleBaseline - rollOutput + pitchOutput - yawOutput; // Front-Right
@@ -159,12 +172,10 @@ void loop()
             uint16_t m3_speed = throttleBaseline + rollOutput - pitchOutput - yawOutput; // Rear-Left
             uint16_t m4_speed = throttleBaseline + rollOutput + pitchOutput + yawOutput; // Front-Left
 
-            // Write unified blended vector directly to the low-level ESC driver
             motors.writeMotors(m1_speed, m2_speed, m3_speed, m4_speed);
         }
         else
         {
-            // Idle Spin / Min Throttle Guardrail when stick is down to prevent ground spin
             motors.writeMotors(1040, 1040, 1040, 1040);
         }
 
@@ -177,7 +188,7 @@ void loop()
         break;
 
     case FAILSAFE:
-        motors.commandAllMin(); // Force motor safe shutdown threshold
+        motors.commandAllMin();
         break;
 
     default:
@@ -187,4 +198,7 @@ void loop()
 
     // 5. Stream isolated metrics without loop degradation
     sendTelemetry();
+
+    // 6. Asynchronously append current telemetry frame down to SD block
+    writeBlackbox();
 }
