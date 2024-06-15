@@ -2,8 +2,8 @@
  * @file main.cpp
  * @author javtl
  * @brief Aegis-Quad Flight Control System - Integrated Executive FSM Core
- * @version 1.5
- * @date 2024-06-03
+ * @version 1.6
+ * @date 2026-06-28
  */
 
 #include <Arduino.h>
@@ -23,7 +23,6 @@ enum FlightState
     ARMED,
     FAILSAFE
 };
-
 FlightState currentState = BOOT;
 
 // --- Hardware Instantiations ---
@@ -31,7 +30,7 @@ IMU imu;
 Radio radio(Serial2);
 Motors motors;
 Battery battery;
-Blackbox blackbox(10); // Instancia de la Blackbox usando el Pin 10 como Chip Select (CS)
+Blackbox blackbox(10); // Chip Select (CS) en Pin 10
 
 // --- Phase 3: Triple-Axis PID Control Loop Instantiation ---
 PID rollPID(1.20f, 0.05f, 0.035f);
@@ -43,32 +42,28 @@ unsigned long previousMicros = 0;
 const unsigned long targetCycleTime = 4000; // Hard real-time 250Hz Main Loop (4ms)
 
 unsigned long previousTelemetryMillis = 0;
-const unsigned long telemetryInterval = 20; // Bound telemetry serialization to 50Hz (20ms)
+const unsigned long telemetryInterval = 20; // Telemetría UART a 50Hz (20ms)
 
-// Phase 4: Multi-Rate Blackbox Constraints
 unsigned long previousBlackboxMillis = 0;
-const unsigned long blackboxInterval = 50; // Bound local SD logging to 20Hz (50ms) to prevent write stalls
+const unsigned long blackboxInterval = 50; // Escritura SD a 20Hz (50ms) para evitar write stalls
 
-// Phase 4: Static Telemetry Buffer Allocation to eliminate dynamic overhead
+// --- Static Buffers Allocation (Elimina overhead dinámico en runtime) ---
 char telemetryBuffer[96];
+char blackboxBuffer[96];
 
 void sendTelemetry()
 {
-    if (millis() - previousTelemetryMillis >= telemetryInterval)
+    unsigned long currentMillis = millis();
+    if (currentMillis - previousTelemetryMillis >= telemetryInterval)
     {
-        previousTelemetryMillis = millis();
+        previousTelemetryMillis = currentMillis;
 
-        // High-speed single-pass formatting directly into memory block
-        int written = snprintf(telemetryBuffer, sizeof(telemetryBuffer),
-                               "%lu,%.2f,%.2f,%u,%.2f,%d",
-                               previousTelemetryMillis,
-                               imu.getPitch(),
-                               imu.getRoll(),
-                               radio.getThrottle(),
-                               battery.getVoltage(),
-                               (int)currentState);
+        // Formateo directo en memoria estática
+        int written = snprintf(telemetryBuffer, sizeof(telemetryBuffer), "%lu,%.2f,%.2f,%u,%.2f,%d",
+                               previousTelemetryMillis, imu.getPitch(), imu.getRoll(),
+                               radio.getThrottle(), battery.getVoltage(), (int)currentState);
 
-        // Single atomic hardware UART write operation
+        // Operación atómica de escritura UART
         if (written > 0 && written < (int)sizeof(telemetryBuffer))
         {
             Serial.println(telemetryBuffer);
@@ -78,13 +73,21 @@ void sendTelemetry()
 
 void writeBlackbox()
 {
-    // Solo escribimos localmente en la SD si ha pasado el intervalo de 50ms y el dron está armado
-    if (currentState == ARMED && (millis() - previousBlackboxMillis >= blackboxInterval))
+    // Solo registramos si está ARMED y ha pasado el intervalo de 50ms
+    unsigned long currentMillis = millis();
+    if (currentState == ARMED && (currentMillis - previousBlackboxMillis >= blackboxInterval))
     {
-        previousBlackboxMillis = millis();
+        previousBlackboxMillis = currentMillis;
 
-        // Ingestión atómica directa utilizando el buffer estático pre-formateado
-        blackbox.writeRow(telemetryBuffer);
+        // Genera su propio frame independiente para evitar colisiones con el ritmo de la telemetría
+        int written = snprintf(blackboxBuffer, sizeof(blackboxBuffer), "%lu,%.2f,%.2f,%u,%.2f,%d",
+                               previousBlackboxMillis, imu.getPitch(), imu.getRoll(),
+                               radio.getThrottle(), battery.getVoltage(), (int)currentState);
+
+        if (written > 0 && written < (int)sizeof(blackboxBuffer))
+        {
+            blackbox.writeRow(blackboxBuffer);
+        }
     }
 }
 
@@ -97,8 +100,6 @@ void setup()
     radio.init();
     motors.init();
     battery.init();
-
-    // Inicialización del sistema de almacenamiento Blackbox
     blackbox.init();
 
     currentState = DISARMED;
@@ -107,7 +108,7 @@ void setup()
 
 void loop()
 {
-    // 1. Enforce deterministic hard real-time execution constraint
+    // 1. Enforce deterministic hard real-time execution constraint (250Hz)
     while (micros() - previousMicros < targetCycleTime)
         ;
     previousMicros = micros();
@@ -143,7 +144,6 @@ void loop()
         motors.commandAllMin();
         Serial.println("AEGIS-QUAD: Sensor Bias Recalibration in Progress...");
         imu.calibrateGyro();
-
         currentState = ARMED;
         Serial.println("AEGIS-QUAD: Safety Overridden. MOTORS LIVE.");
         break;
@@ -171,7 +171,6 @@ void loop()
             uint16_t m2_speed = throttleBaseline - rollOutput - pitchOutput + yawOutput; // Rear-Right
             uint16_t m3_speed = throttleBaseline + rollOutput - pitchOutput - yawOutput; // Rear-Left
             uint16_t m4_speed = throttleBaseline + rollOutput + pitchOutput + yawOutput; // Front-Left
-
             motors.writeMotors(m1_speed, m2_speed, m3_speed, m4_speed);
         }
         else
@@ -189,6 +188,12 @@ void loop()
 
     case FAILSAFE:
         motors.commandAllMin();
+        // Permite desarmar manualmente en Failsafe para cortar alertas/bloqueos
+        if (radio.checkDisarmingSequence())
+        {
+            currentState = DISARMED;
+            Serial.println("AEGIS-QUAD: Failsafe Cleared. System Disarmed.");
+        }
         break;
 
     default:
