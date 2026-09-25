@@ -55,7 +55,3 @@ git clone https://github.com/javtl/Aegis-Quad.git
 ---
 
 *Developed as an engineering portfolio piece. Code structure and technical choices are thoroughly detailed within the internal project documentation (`docs/`).*
-
-```
-
----
