@@ -1,4 +1,4 @@
-```markdown
+
 # Aegis-Quad: Electrical Architecture & Signal Routing
 
 This document defines the electrical wiring layout, power distribution boundaries, and signal routing topology for the Aegis-Quad Flight Control System. The design prioritizes EMI (Electromagnetic Interference) isolation between high-current actuator loops and sensitive low-voltage digital buses.
@@ -11,7 +11,6 @@ The architecture is divided into two strict electrical domains isolated by a ste
 
 1. **High-Power Domain (Actuators):** Raw LiPo battery voltage (11.1V - 12.6V) drawing up to 60A continuous.
 2. **Low-Power Domain (Logic):** Regulated 5.0V and 3.3V lines drawing < 500mA for instrumentation.
-```
 
 ```
               [ LiPo Battery 3S (11.1V - 12.6V) ]
@@ -34,7 +33,7 @@ The architecture is divided into two strict electrical domains isolated by a ste
 
 ```
 
-```
+
 
 ---
 
